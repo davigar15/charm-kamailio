@@ -17,7 +17,7 @@ Assuming you have Juju installed and bootstrapped on a Kubernetes cluster
 
 ```bash
 # Clone the charm code
-$ git clone https://github.com/gmeszaros/kamailio && cd kamailio
+$ git clone https://github.com/gmeszaros/charm-kamailio && cd charm-kamailio
 
 # Build the charm package
 $ charmcraft pack
@@ -26,7 +26,7 @@ $ charmcraft pack
 $ juju deploy ./kamailio_ubuntu-20.04-amd64.charm  --resource kamailio-image=kamailio/kamailio:5.3.3-stretch
 
 # Deploy the ingress integrator charm
-$ juju deploy nginx-ingress-integrator --config ingress-class="public"
+$ juju deploy nginx-ingress-integrator
 
 # Relate kamailio and ingress integrator
 $ juju add-relation kamailio nginx-ingress-integrator
@@ -68,7 +68,7 @@ $ sudo usermod -aG microk8s $(whoami)
 $ newgrp microk8s
 
 # Install Charmcraft
-$ sudo snap install charmcraft
+$ sudo snap install charmcraft --classic
 
 # Install juju
 $ sudo snap install --classic juju
@@ -84,7 +84,7 @@ $ juju add-model development
 
 ```bash
 # Clone the charm code
-$ git clone https://github.com/gmeszaros/kamailio && cd kamailio
+$ git clone https://github.com/gmeszaros/charm-kamailio && cd charm-kamailio
 
 # Build the charm package
 $ charmcraft pack
@@ -93,7 +93,7 @@ $ charmcraft pack
 $ juju deploy ./kamailio_ubuntu-20.04-amd64.charm  --resource kamailio-image=kamailio/kamailio:5.3.3-stretch
 
 # Deploy the ingress integrator charm
-$ juju deploy nginx-ingress-integrator --config ingress-class="public"
+$ juju deploy nginx-ingress-integrator
 
 # Relate kamailio and ingress integrator
 $ juju add-relation kamailio nginx-ingress-integrator
