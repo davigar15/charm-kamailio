@@ -13,196 +13,286 @@ develop a new k8s charm using the Operator Framework:
 """
 
 import logging
+from typing import Any, Dict
 
 from charms.nginx_ingress_integrator.v0.ingress import IngressRequires
-from ops.charm import CharmBase
+from ops.charm import ActionEvent, CharmBase
 from ops.framework import StoredState
 from ops.main import main
-from ops.model import ActiveStatus, BlockedStatus
-from ops.pebble import ServiceStatus
+from ops.model import (
+    ActiveStatus,
+    BlockedStatus,
+    Container,
+    MaintenanceStatus,
+    WaitingStatus,
+)
+from ops.pebble import ServiceStatus, PathError
 
 logger = logging.getLogger(__name__)
 
 
 class KamailioCharm(CharmBase):
-    """Charm the service."""
+    """Kamailio Charm Operator."""
 
+    # StoredState is used to store data the charm needs persisted across invocations.
     _stored = StoredState()
 
-    def __init__(self, *args):
+    def __init__(self, *args) -> None:
         super().__init__(*args)
 
-        self.framework.observe(self.on.config_changed,
-                               self._on_config_changed)
-
-        # Observe action events
-        action_event_observer_mapping = {
-            "restart": self._on_restart_action,
-            "start": self._on_start_action,
-            "stop": self._on_stop_action,
-            "kamctl": self._on_kamctl_action,
+        # Observe charm events
+        event_observer_mapping = {
+            self.on.kamailio_pebble_ready: self._on_config_changed,
+            self.on.config_changed: self._on_config_changed,
+            self.on.update_status: self._on_update_status,
+            self.on.restart_action: self._on_restart_action,
+            self.on.start_action: self._on_start_action,
+            self.on.stop_action: self._on_stop_action,
         }
-        for event, observer in action_event_observer_mapping.items():
-            logger.debug(f"event: {event}")
-            self.framework.observe(self.on[event].action, observer)
+        for event, observer in event_observer_mapping.items():
+            self.framework.observe(event, observer)
 
-        self._stored.set_default(
-            external_url=self.app.name,
-            tls_secret_name="",
-            bind_address_port=self.model.config["bind-address-port"],
-            sip_domain=self.model.config["sip-domain"]
-        )
+        # Set default values for StoredState
+        self._stored.set_default(sip_domain=None)
 
         self.ingress = IngressRequires(self, self._ingress_config)
 
-    def _on_config_changed(self, event):
-        """Handle the config-changed event"""
+    # ---------------------------------------------------------------------------
+    #   Properties
+    # ---------------------------------------------------------------------------
 
-        logging.debug('Handling Juju config change')
+    @property
+    def _ingress_config(self) -> Dict[str, Any]:
+        """Ingress configuration property."""
+        ingress_config = {
+            "service-hostname": self.config.get("external-url", self.app.name),
+            "service-name": self.app.name,
+            "service-port": 5060,
+        }
+        if tls_secret_name := self.config.get("tls-secret-name"):
+            ingress_config["tls-secret-name"] = tls_secret_name
+        return ingress_config
 
-        container = self.unit.get_container("kamailio")
+    # ---------------------------------------------------------------------------
+    #   Handlers for Charm Events
+    # ---------------------------------------------------------------------------
 
-        layer = self._kamailio_layer()
+    def _on_config_changed(self, _) -> None:
+        """Handler for the config-changed event."""
 
-        if "error" in layer:
-            self.unit.status = BlockedStatus(layer["error"])
-            logger.warning(layer["error"])
+        # Validate charm configuration
+        try:
+            self._validate_config()
+        except Exception as e:
+            self.unit.status = BlockedStatus(f"{e}")
             return
 
-        if "external-url" in self.model.config and \
-                self.model.config["external-url"] != self._stored.external_url:
-            self._stored.external_url = self.model.config["external-url"]
-            self.ingress.update_config(self._ingress_config)
+        # Check Pebble has started in the container
+        container: Container = self.unit.get_container("kamailio")
+        if not container.can_connect():
+            logger.debug("waiting for pebble to start")
+            self.unit.status = MaintenanceStatus("waiting for pebble to start")
+            return
 
-        if "tls-secret-name" in self.model.config and \
-                self.model.config["tls-secret-name"] != self._stored.tls_secret_name:
-            self._stored.tls_secret_name = self.model.config["tls-secret-name"]
-            self.ingress.update_config(self._ingress_config)
+        # Update ingress config
+        self.ingress.update_config(self._ingress_config)
 
-        if "bind-address-port" in self.model.config and \
-                self.model.config["bind-address-port"] != self._stored.bind_address_port:
-            self._stored.bind_address_port_port = self.model.config["bind-address-port"]
-            self._render_kamailio_config()
-
-        if "sip-domain" in self.model.config and \
-                self.model.config["sip-domain"] != self._stored.sip_domain:
-            self._stored.bind_address_port_port = self.model.config["sip-domain"]
-            self._render_kamctlrc_config()
-
-        plan = container.get_plan()
-
-        if plan.services != layer["services"]:
-            container.add_layer("kamailio", layer, combine=True)
-            logger.info("Added updated layer 'kamailio' to Pebble plan")
-
-            if container.get_service("kamailio").is_running():
-                container.stop("kamailio")
-
-            container.start("kamailio")
-            logging.info("Restarted kamailio service")
-
-        self.unit.status = ActiveStatus(f'{"Container is running"}')
-
-    def _kamailio_layer(self) -> dict:
-        """Generate Pebble Layer for Kamailio"""
-
-        return {
-            "summary": "kamailio layer",
-            "description": "pebble config layer for kamailio",
-            "services": {
-                "kamailio": {
-                    "override": "replace",
-                    "summary": "kamailio",
-                    "command": "kamailio -DD -E",
-                    "startup": "enabled",
-                }
+        # Add Pebble layer with the Kamailio service
+        container.add_layer(
+            "kamailio",
+            {
+                "summary": "kamailio layer",
+                "description": "pebble config layer for kamailio",
+                "services": {
+                    "kamailio": {
+                        "override": "replace",
+                        "summary": "kamailio",
+                        "command": "kamailio -DD -E",
+                        "startup": "enabled",
+                    }
+                },
             },
-        }
+            combine=True,
+        )
+        container.replan()
 
-    def _on_restart_action(self, event):
-        """Observer for restart action event"""
+        # Configure kamailio and restart service if needed
+        configuration_has_changed = self._configure_kamailio()
+        if configuration_has_changed:
+            container.restart("kamailio")
+
+        self._on_update_status()
+
+    def _on_update_status(self, _=None) -> None:
+        """Handler for the update-status event."""
+
+        # Check if the kamailio service is configured
+        container: Container = self.unit.get_container("kamailio")
+        if "kamailio" not in container.get_plan().services:
+            self.unit.status = WaitingStatus("kamailio service not configured yet")
+            return
+
+        # Check if the kamailio service is running
+        if container.get_service("kamailio").current == ServiceStatus.ACTIVE:
+            self.unit.status = ActiveStatus("kamailio service is running")
+        else:
+            self.unit.status = BlockedStatus("kamailio service is not running")
+
+    def _on_restart_action(self, event: ActionEvent) -> None:
+        """Handler for the restart-action event."""
+
         try:
             self._restart_kamailio()
             event.set_results({"output": "service restarted"})
         except Exception as e:
             event.fail(f"Failed restarting kamailio: {e}")
 
-    def _on_start_action(self, event):
-        """Observer for start action event"""
+    def _on_start_action(self, event: ActionEvent) -> None:
+        """Handler for the start-action event."""
+
         try:
             self._start_kamailio()
             event.set_results({"output": "service started"})
         except Exception as e:
             event.fail(f"Failed starting kamailio: {e}")
 
-    def _on_stop_action(self, event):
-        """Observer for stop action event"""
+    def _on_stop_action(self, event: ActionEvent) -> None:
+        """Handler for the stop-action event."""
+
         try:
             self._stop_kamailio()
             event.set_results({"output": "service stopped"})
         except Exception as e:
             event.fail(f"Failed stopping kamailio: {e}")
 
-    def _on_kamctl_action(self, event):
-        """Observer for kamctl action event"""
+    # ---------------------------------------------------------------------------
+    #   Validation and configuration
+    # ---------------------------------------------------------------------------
 
-        if event.params["args"]:
-            event.set_results({"kamctl called with args": "Currently not implemented."})
-            # check_call(["kamctl", args])
-        else:
-            event.set_results({"kamctl called": "Currently not implemented."})
+    def _validate_config(self) -> None:
+        """Validate charm configuration.
 
-    @property
-    def _external_url(self):
-        return self.config.get("external-url") or self.app.name
+        Raises:
+            Exception: if charm configuration is invalid.
+        """
 
-    @property
-    def _ingress_config(self):
-        ingress_config = {
-            "service-hostname": self._external_url,
-            "service-name": self.app.name,
-            "service-port": 5060,
-        }
-        tls_secret_name = self.config.get("tls-secret-name")
-        if tls_secret_name:
-            ingress_config["tls-secret-name"] = tls_secret_name
-        return ingress_config
+        # Check if sip-domain config is missing
+        if "sip-domain" not in self.config:
+            raise Exception('missing charm config: "sip-domain"')
 
-    def _render_kamctlrc_config(self):
-        logger.warning("in _render_kamctlrc_config: %s" % self.model.config["sip-domain"])
+        # Check if sip-domain config value is valid
+        if len(self.config.get("sip-domain", "")) < 1:
+            raise Exception('"sip-domain" config must be a non-empty string')
+
+    def _configure_kamailio(self) -> bool:
+        """Configure kamailio service.
+
+        This function is in charge of pushing configuration files to the container.
+
+        Returns:
+            bool: True if the configuration has changed, else False.
+        """
+
+        configuration_has_changed = False
         container = self.unit.get_container("kamailio")
-        config = container.pull('/etc/kamailio/kamctlrc').read()
-        container.push('/etc/kamailio/kamctlrc.bak', config)
-        logger.warning("kamctlrc: %s" % config)
-        config = "SIP-DOMAIN=" + self.model.config["sip-domain"]
-        container.push('/etc/kamailio/kamctlrc', config)
 
-    def _render_kamailio_config(self):
-        logger.warning("in _render_kamailio_config: %s" % self.model.config["bind-address-port"])
+        # Configure /etc/kamailio/kamailio-local.cfg
+        if not self._file_exists(container, "/etc/kamailio/kamailio-local.cfg"):
+            container.push(
+                "/etc/kamailio/kamailio-local.cfg",
+                "listen=udp:0.0.0.0:5060",
+            )
+            configuration_has_changed = True
+
+        # Configure /etc/kamailio/kamctlrc
+        if self.config["sip-domain"] != self._stored.sip_domain:
+            # Backup original configuration file
+            if not self._file_exists(container, "/etc/kamailio/kamctlrc.backup"):
+                container.push(
+                    "/etc/kamailio/kamctlrc.backup",
+                    container.pull("/etc/kamailio/kamctlrc").read(),
+                )
+            container.push(
+                "/etc/kamailio/kamctlrc",
+                f'SIP_DOMAIN={self.config["sip-domain"]}',
+            )
+            self._stored.sip_domain = self.config["sip-domain"]
+            configuration_has_changed = True
+        return configuration_has_changed
+
+    def _file_exists(self, container: Container, path: str) -> bool:
+        """Check if a file exists in the container.
+
+        Args:
+            path (str): Path of the file to be checked.
+
+        Returns:
+            bool: True if the file exists, else False.
+        """
+
+        file_exists = None
+        try:
+            _ = container.pull(path)
+            file_exists = True
+        except PathError:
+            file_exists = False
+        except FileNotFoundError:
+            file_exists = False
+        exist_str = "exists" if file_exists else 'doesn"t exist'
+        logger.debug(f"File {path} {exist_str}.")
+        return file_exists
+
+    # ---------------------------------------------------------------------------
+    #   Kamailio service functions (restart, start, stop)
+    # ---------------------------------------------------------------------------
+
+    def _restart_kamailio(self) -> None:
+        """Restart kamailio service.
+
+        Raises:
+            Exception: if the kamailio service is not configured.
+        """
+
+        # Check if kamailio service doesn't exists
         container = self.unit.get_container("kamailio")
-        config = "listen=" + self.model.config["bind-address-port"]
-        container.push('/etc/kamailio/kamailio-local.cfg', config)
+        if "kamailio" not in container.get_plan().services:
+            raise Exception("kamailio service not configured yet.")
 
-    def _restart_kamailio(self):
-        container = self.unit.get_container("kamailio")
-        if container.get_service("kamailio").current == ServiceStatus.ACTIVE:
-            container.stop("kamailio")
-        container.start("kamailio")
-        self.unit.status = ActiveStatus(f'{"Container is running"}')
+        # Restart kamailio service and update unit status
+        container.restart("kamailio")
+        self._on_update_status()
 
-    def _start_kamailio(self):
+    def _start_kamailio(self) -> None:
+        """Start kamailio service.
+
+        Raises:
+            Exception: if the kamailio service is already running.
+        """
+
+        # Check if kamailio service is active
         container = self.unit.get_container("kamailio")
         if container.get_service("kamailio").current == ServiceStatus.ACTIVE:
             raise Exception("kamailio service is already active")
-        container.start("kamailio")
-        self.unit.status = ActiveStatus(f'{"Container is running"}')
 
-    def _stop_kamailio(self):
+        # Start kamailio service and update unit status
+        container.start("kamailio")
+        self._on_update_status()
+
+    def _stop_kamailio(self) -> None:
+        """Stop kamailio service.
+
+        Raises:
+            Exception: if the kamailio service is already stopped.
+        """
+
+        # Check if kamailio service isn't active
         container = self.unit.get_container("kamailio")
         if container.get_service("kamailio").current != ServiceStatus.ACTIVE:
-            raise Exception("kamailio service is not running")
+            raise Exception("kamailio service is already stopped")
+
+        # Stop kamailio service and update unit status
         container.stop("kamailio")
-        self.unit.status = BlockedStatus(f'{"Container Stopped"}')
+        self._on_update_status()
 
 
 if __name__ == "__main__":

@@ -4,13 +4,8 @@
 # Learn more about config at: https://juju.is/docs/sdk/config
 
 options:
-  bind-address-port:
-    default: "udp:0.0.0.0:5060"
-    description: Configure you want Kamailio to bind on a specific interface/port/proto
-                 (default bind on all available)
-    type: string
   sip-domain:
-    default: 'localhost'
+    default: "localhost"
     description: Your SIP domain
   external-url:
     type: string
@@ -19,4 +14,3 @@ options:
     default: ""
     type: string
     description: "The name of the TLS secret to use. Leaving this empty will configure an ingress with TLS disabled."
-

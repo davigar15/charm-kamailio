@@ -8,12 +8,3 @@ start:
   description: Start Kamailio service
 stop:
   description: Stop Kamailio service
-
-# Application management
-kamctl:
-  description: Runs the kamctl command to manage and control Kamailio SIP server
-  params:
-    args:
-      description: "Arbitrary arguments to pass to kamctl"
-      type: string
-      default: ""
