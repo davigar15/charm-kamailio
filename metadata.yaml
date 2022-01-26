@@ -3,7 +3,7 @@
 
 # For a complete list of supported options, see:
 # https://discourse.charmhub.io/t/charm-metadata-v2/3674/15
-name: kamailio
+name: kamailio-k8s
 display-name: |
   Kamailio SIP Server
 description: |

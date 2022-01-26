@@ -6,6 +6,7 @@
 options:
   sip-domain:
     default: "localhost"
+    type: string
     description: Your SIP domain
   external-url:
     type: string
